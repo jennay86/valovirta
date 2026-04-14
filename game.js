@@ -3,8 +3,10 @@
   const ctx = canvas.getContext("2d", { alpha: false });
 
   const scoreEl = document.getElementById("score");
-  const btnToggle = document.getElementById("btnToggle");
   const btnRestart = document.getElementById("btnRestart");
+  const btnMenu = document.getElementById("btnMenu");
+  const menu = document.getElementById("menu");
+  const btnStart = document.getElementById("btnStart");
 
   // --- Canvas sizing (portrait-friendly) ---
   function resize() {
@@ -37,14 +39,38 @@
 
   // Timing window concept (soft): if you swap too late, you likely die at gate.
   // We implement that by making gates "decide" close to the gate line.
-  const gateDecisionDistance = 32; // px before gate line where the "check" happens
+  const gateDecisionDistance = 120; // px before gate line where the "check" happens
+  const gateScore = 10;
+  const hazardScore = 6;
+  const hazardPenalty = 5;  // points lost on hazard hit
+  const bonusScore = 20;
+  const bonusRadius = 14;
+  const leaderboardKey = "valovirta_top5";
+  const hazardHitSfx = "assets/boom.mp3";
+  const bonusCollectSfx = "assets/booster.mp3";
+  const backgroundTracks = [
+    "assets/back1.mp3",
+    "assets/back2.mp3",
+    "assets/back3.mp3",
+    "assets/back4.mp3",
+    "assets/back5.mp3",
+  ];
 
   // --- State ---
-  let running = true;
+  let running = false;
   let gameOver = false;
+  let menuVisible = true;
+
+  // Hide menu button initially (show only during game)
+  btnMenu.style.display = "none";
 
   let t = 0;          // seconds
   let lastTs = 0;
+  let score = 0;
+  let leaderboard = [];
+  let latestRank = null;
+  let leaderboardChecked = false;
+  let backgroundMusic = null;
 
   // Player in "world" space: x is lane-based, y increases forward; camera follows y.
   const player = {
@@ -68,11 +94,121 @@
   function rand(min, max) { return min + Math.random() * (max - min); }
   function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
 
+  function pickRandomTrack(currentSrc = "") {
+    const pool = backgroundTracks.filter((track) => !currentSrc.endsWith(track));
+    return choice(pool.length > 0 ? pool : backgroundTracks);
+  }
+
+  function stopBackgroundMusic() {
+    if (!backgroundMusic) return;
+    backgroundMusic.pause();
+    backgroundMusic.currentTime = 0;
+  }
+
+  function playBackgroundMusic() {
+    if (!backgroundMusic) {
+      backgroundMusic = new Audio();
+      backgroundMusic.volume = 0.32;
+      backgroundMusic.addEventListener("ended", () => {
+        if (!running || menuVisible || gameOver) return;
+        backgroundMusic.src = pickRandomTrack(backgroundMusic.src);
+        backgroundMusic.currentTime = 0;
+        backgroundMusic.play().catch(() => {});
+      });
+    }
+
+    backgroundMusic.src = pickRandomTrack(backgroundMusic.src);
+    backgroundMusic.currentTime = 0;
+    backgroundMusic.play().catch(() => {});
+  }
+
+  function playSfx(src, volume) {
+    const sfx = new Audio(src);
+    sfx.volume = volume;
+    sfx.play().catch(() => {});
+  }
+
+  function loadLeaderboard() {
+    try {
+      const raw = localStorage.getItem(leaderboardKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((v) => Number.isFinite(v) && v >= 0)
+        .map((v) => Math.floor(v))
+        .sort((a, b) => b - a)
+        .slice(0, 5);
+    } catch {
+      return [];
+    }
+  }
+
+  function saveLeaderboard() {
+    localStorage.setItem(leaderboardKey, JSON.stringify(leaderboard));
+  }
+
+  function updateLeaderboardForScore() {
+    if (leaderboardChecked || score <= 0) return;
+
+    leaderboardChecked = true;
+    latestRank = null;
+
+    const next = [...leaderboard];
+    let insertAt = next.findIndex((value) => score >= value);
+
+    if (insertAt === -1) {
+      if (next.length < 5) {
+        insertAt = next.length;
+        next.push(score);
+      }
+    } else {
+      next.splice(insertAt, 0, score);
+    }
+
+    if (insertAt !== -1) {
+      if (next.length > 5) next.pop();
+      leaderboard = next;
+      latestRank = insertAt + 1;
+      saveLeaderboard();
+    }
+  }
+
+  function handleGameOver() {
+    gameOver = true;
+    player.alive = false;
+    btnMenu.style.display = "block";
+    running = true; // still render
+    updateLeaderboardForScore();
+    stopBackgroundMusic();
+  }
+
+  function startGame() {
+    menuVisible = false;
+    menu.classList.add("menu-hidden");
+    btnMenu.style.display = "none";
+    running = true;
+    reset();
+    playBackgroundMusic();
+  }
+
+  function returnToMenu() {
+    menuVisible = true;
+    menu.classList.remove("menu-hidden");
+    btnMenu.style.display = "none";
+    running = false;
+    gameOver = false;
+    stopBackgroundMusic();
+  }
+
   function reset() {
     running = true;
     gameOver = false;
+    btnMenu.style.display = "none";
     t = 0;
     lastTs = 0;
+    score = 0;
+    latestRank = null;
+    leaderboardChecked = false;
 
     player.lane = 0;
     player.y = 0;
@@ -80,7 +216,7 @@
 
     events.length = 0;
     nextEventY = 700;
-    scoreEl.textContent = "0";
+    scoreEl.textContent = score.toString();
 
     // Prime with some easy pattern
     for (let i = 0; i < 8; i++) spawnEvent();
@@ -88,17 +224,29 @@
 
   function spawnEvent() {
     // alternate between gates and hazards, with a bit of controlled randomness
-    const type = (events.length % 2 === 0) ? "gate" : (Math.random() < 0.55 ? "hazard" : "gate");
+    // occasionally add a bonus ball
+    let type;
+    if (Math.random() < 0.12) {
+      type = "bonus";
+    } else if (events.length % 2 === 0) {
+      type = "gate";
+    } else {
+      type = Math.random() < 0.55 ? "hazard" : "gate";
+    }
 
     const y = nextEventY;
 
     if (type === "gate") {
       const openLane = Math.random() < 0.5 ? 0 : 1;
-      events.push({ type: "gate", y, openLane, resolved: false });
-    } else {
+      events.push({ type: "gate", y, openLane, resolved: false, scored: false });
+    } else if (type === "hazard") {
       // hazard occupies one lane
       const lane = Math.random() < 0.5 ? 0 : 1;
-      events.push({ type: "hazard", y, lane, hit: false });
+      events.push({ type: "hazard", y, lane, hit: false, passed: false });
+    } else if (type === "bonus") {
+      // bonus ball random lane, can be collected
+      const lane = Math.random() < 0.5 ? 0 : 1;
+      events.push({ type: "bonus", y, lane, collected: false });
     }
 
     nextEventY += rand(minSpawnDistance, maxSpawnDistance);
@@ -106,11 +254,8 @@
 
   function toggleLane() {
     if (!running) return;
+    if (gameOver) return;
 
-    if (gameOver) {
-      reset();
-      return;
-    }
     player.lane = 1 - player.lane;
   }
 
@@ -118,23 +263,35 @@
   window.addEventListener("keydown", (e) => {
     if (e.code === "Space" || e.code === "Enter") {
       e.preventDefault();
-      toggleLane();
+      if (menuVisible) {
+        startGame();
+      } else if (!gameOver) {
+        toggleLane();
+      }
     }
   }, { passive: false });
 
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    toggleLane();
+    if (!menuVisible && !gameOver) {
+      toggleLane();
+    }
   }, { passive: false });
 
-  btnToggle.addEventListener("click", (e) => {
+  btnStart.addEventListener("click", (e) => {
     e.preventDefault();
-    toggleLane();
+    startGame();
+  });
+
+  btnMenu.addEventListener("click", (e) => {
+    e.preventDefault();
+    returnToMenu();
   });
 
   btnRestart.addEventListener("click", (e) => {
     e.preventDefault();
     reset();
+    if (!menuVisible) playBackgroundMusic();
   });
 
   // --- Rendering helpers ---
@@ -179,7 +336,7 @@
       const steps = 22;
       for (let i = 0; i <= steps; i++) {
         const y = railTop + (railBottom - railTop) * (i / steps);
-        const worldY = cameraY + (y - canvas.height * 0.72);
+        const worldY = cameraY + (y - canvas.height * 0.45);
         const bend = Math.sin((worldY * 0.004) + t * 2.2) * (12 + 18 * pulse);
         const px = x + bend;
         const py = y + wobbleY * 0.12;
@@ -194,7 +351,7 @@
       ctx.beginPath();
       for (let i = 0; i <= steps; i++) {
         const y = railTop + (railBottom - railTop) * (i / steps);
-        const worldY = cameraY + (y - canvas.height * 0.72);
+        const worldY = cameraY + (y - canvas.height * 0.45);
         const bend = Math.sin((worldY * 0.004) + t * 2.2) * (10 + 14 * pulse);
         const px = x + bend;
         const py = y + wobbleY * 0.12;
@@ -257,6 +414,31 @@
     ctx.fill();
   }
 
+  function drawBonus(x, y, pulse) {
+    // Bonus ball: golden glow with shine
+    const r = bonusRadius;
+    const g = ctx.createRadialGradient(x, y, 2, x, y, r * 2.8);
+    g.addColorStop(0, `rgba(255,250,150,${0.90})`);
+    g.addColorStop(0.3, `rgba(255,230,50,${0.40 + 0.25 * pulse})`);
+    g.addColorStop(1, `rgba(255,200,0,0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Golden core
+    ctx.fillStyle = `rgba(255,240,100,${0.85})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Shine spot
+    ctx.fillStyle = "rgba(255,255,200,0.60)";
+    ctx.beginPath();
+    ctx.arc(x - r * 0.4, y - r * 0.4, r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   function drawPlayer(x, y, pulse, alive) {
     const r = playerRadius;
     const glow = ctx.createRadialGradient(x, y, 2, x, y, r * 4);
@@ -299,27 +481,44 @@
         if (player.y >= ev.y - gateDecisionDistance) {
           ev.resolved = true;
           if (player.lane !== ev.openLane) {
-            gameOver = true;
-            player.alive = false;
-            running = true; // still render
+            handleGameOver();
+            break;
+          } else if (!ev.scored) {
+            ev.scored = true;
+            score += gateScore;
           }
         }
-      } else if (ev.type === "hazard" && !ev.hit) {
+      } else if (ev.type === "hazard" && !ev.hit && !ev.passed) {
         // Simple distance check near hazard line (since movement is mostly along y)
         const dy = Math.abs(player.y - ev.y);
         if (dy < hazardRadius + playerRadius * 0.9) {
           if (player.lane === ev.lane) {
             ev.hit = true;
-            gameOver = true;
-            player.alive = false;
-            running = true;
+            playSfx(hazardHitSfx, 0.28);
+            // Lose points but continue playing
+            score = Math.max(0, score - hazardPenalty);
           }
+        } else if (player.y > ev.y + hazardRadius + playerRadius * 0.9) {
+          ev.passed = true;
+          // No points for avoiding, only penalty for hitting
+        }
+      } else if (ev.type === "bonus" && !ev.collected) {
+        // Check if player collects bonus
+        const dy = Math.abs(player.y - ev.y);
+        if (dy < bonusRadius + playerRadius * 1.2) {
+          if (player.lane === ev.lane) {
+            ev.collected = true;
+            playSfx(bonusCollectSfx, 0.38);
+            score += bonusScore;
+          }
+        } else if (player.y > ev.y + bonusRadius + playerRadius * 1.2) {
+          // Bonus passed without collection, mark as collected so not checked again
+          ev.collected = true;
         }
       }
     }
 
-    // Score: time survived (integer)
-    scoreEl.textContent = Math.floor(t * 10).toString();
+    scoreEl.textContent = score.toString();
   }
 
   function render() {
@@ -330,9 +529,9 @@
     const beat = (t * bpm) / 60; // cycles per second
     const pulse = (Math.sin(beat * Math.PI * 2) * 0.5 + 0.5);
 
-    // Camera: keep player around 72% height
+    // Camera: keep player around 45% height
     const cameraY = player.y;
-    const targetScreenY = canvas.height * 0.72;
+    const targetScreenY = canvas.height * 0.45;
 
     // Wobble increases over time
     const wobbleAmp = Math.min(maxWobbleAmp, startWobbleAmp + t * wobbleRampPerSec);
@@ -354,6 +553,9 @@
       } else if (ev.type === "hazard") {
         const x = laneX(ev.lane, wobbleX);
         drawHazard(x, screenY, pulse);
+      } else if (ev.type === "bonus") {
+        const x = laneX(ev.lane, wobbleX);
+        drawBonus(x, screenY, pulse);
       }
     }
 
@@ -370,11 +572,32 @@
       ctx.fillStyle = "rgba(233,236,255,0.95)";
       ctx.textAlign = "center";
       ctx.font = `${Math.floor(canvas.width * 0.06)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      ctx.fillText("Peli loppui", canvas.width * 0.5, canvas.height * 0.42);
+      ctx.fillText("Peli loppui", canvas.width * 0.5, canvas.height * 0.36);
 
       ctx.fillStyle = "rgba(233,236,255,0.75)";
       ctx.font = `${Math.floor(canvas.width * 0.038)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      ctx.fillText("Napauta / välilyönti: aloita alusta", canvas.width * 0.5, canvas.height * 0.48);
+      
+
+      ctx.fillStyle = "rgba(190,240,255,0.92)";
+      ctx.font = `${Math.floor(canvas.width * 0.04)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.fillText("Top 5", canvas.width * 0.5, canvas.height * 0.50);
+
+      ctx.fillStyle = "rgba(233,236,255,0.88)";
+      ctx.font = `${Math.floor(canvas.width * 0.034)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      if (leaderboard.length === 0) {
+        ctx.fillText("Ei tuloksia viela", canvas.width * 0.5, canvas.height * 0.55);
+      } else {
+        for (let i = 0; i < leaderboard.length; i++) {
+          const lineY = canvas.height * 0.55 + i * Math.floor(canvas.height * 0.04);
+          ctx.fillText(`${i + 1}. ${leaderboard[i]} p`, canvas.width * 0.5, lineY);
+        }
+      }
+
+      if (latestRank !== null) {
+        ctx.fillStyle = "rgba(160,255,220,0.95)";
+        ctx.font = `${Math.floor(canvas.width * 0.04)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.78);
+      }
     }
   }
 
@@ -389,6 +612,6 @@
     requestAnimationFrame(loop);
   }
 
-  reset();
+  leaderboard = loadLeaderboard();
   requestAnimationFrame(loop);
 })();

@@ -7,17 +7,40 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div id="menu" class="menu-visible">
+    <div class="menu-bg">
+      <div class="menu-glow menu-glow-1"></div>
+      <div class="menu-glow menu-glow-2"></div>
+      <div class="menu-glow menu-glow-3"></div>
+    </div>
+    <div class="menu-content">
+      <h1>Valovirta</h1>
+      <p>Seuraa valokuvioita ja vaihda kaistaa oikeaan aikaan.</p>
+      
+      <div class="rules">
+        <h3>Pisteet</h3>
+        <ul>
+          <li><span class="gate-label">Portit</span> +10 p — Portin läpäisy oikeaa kaistaa</li>
+          <li><span class="hazard-label">Vaarat</span> -5 p — Osuma punaiseen palloon</li>
+          <li><span class="bonus-label">Bonus</span> +20 p — Keltaisen pallon keräys</li>
+        </ul>
+      </div>
+
+      <button id="btnStart">Aloita peli</button>
+    </div>
+  </div>
+
   <div id="ui">
     <div class="top">
       <div id="title">Valovirta</div>
       <div id="score">0</div>
     </div>
 
-    <div id="hint">Napauta / välilyönti: vaihda kaistaa</div>
+    <div id="hint">Vaihda kaistaa</div>
 
     <div class="bottom">
-      <button id="btnToggle" aria-label="Vaihda kaistaa">Vaihda</button>
       <button id="btnRestart">Aloita alusta</button>
+      <button id="btnMenu" aria-label="Etusivulle">Etusivulle</button>
     </div>
   </div>
 
