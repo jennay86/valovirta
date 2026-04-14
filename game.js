@@ -9,6 +9,7 @@
   const btnStart = document.getElementById("btnStart");
   const titleEl = document.getElementById("title");
   const hintEl = document.getElementById("hint");
+  const dailyChallengeEl = document.getElementById("dailyChallenge");
 
   // --- Canvas sizing (portrait-friendly) ---
   function resize() {
@@ -40,15 +41,23 @@
   const wobbleRampPerSec = 6.5; // how fast wobble increases
   const wobbleFreq = 0.9;       // Hz-ish
 
-  // Timing window concept (soft): if you swap too late, you likely die at gate.
-  // We implement that by making gates "decide" close to the gate line.
-  const gateDecisionDistance = 120; // px before gate line where the "check" happens
+  // Gate decisions are resolved exactly when crossing the gate line.
   const gateScore = 10;
   const hazardScore = 6;
   const hazardPenalty = 5;  // points lost on hazard hit
   const bonusScore = 20;
+  const bonusChainStep = 3;
+  const nearMissWindow = 55;
+  const nearMissScore = 5;
+  const dailyChallengeRewardScore = 50;
   const bonusRadius = 14;
   const leaderboardKey = "valovirta_top5";
+  const dailyChallengeKey = "valovirta_daily_challenge_v1";
+  const dailyChallengePool = [
+    { id: "gates_100", metric: "gates", target: 100, text: "Läpäise 100 porttia" },
+    { id: "bonus_20", metric: "bonus", target: 20, text: "Kerää 20 bonuspalloa" },
+    { id: "perfect_10", metric: "perfect", target: 10, text: "Saa 10 viime hetken bonusta" },
+  ];
   const hazardHitSfx = "assets/boom.mp3";
   const bonusCollectSfx = "assets/booster.mp3";
   const mainMusicTrack = "assets/main_music.mp3";
@@ -78,6 +87,140 @@
   let leaderboardChecked = false;
   let backgroundMusic = null;
   let mainMusic = null;
+  let displayX = null;
+  const playerTrail = [];
+  let lastLaneSwitchY = -1e9;
+  let lastLaneSwitchTo = -1;
+  let nearMissPopupTimer = 0;
+  let gatesPassed = 0;
+  let bonusChain = 0;
+  let bonusChainPopup = "";
+  let bonusChainPopupTimer = 0;
+  let nextMilestone = 100;
+  let milestonePulse = 0;
+  let pointsToBest = null;
+  let dailyChallenge = null;
+  let dailyChallengePopup = "";
+  let dailyChallengePopupTimer = 0;
+
+  function milestoneStep(target) {
+    if (target < 300) return 100;
+    if (target < 800) return 150;
+    return 200;
+  }
+
+  function dayStamp() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function pickChallengeForDay(stamp) {
+    const seed = Number(stamp.replaceAll("-", "")) || 0;
+    const def = dailyChallengePool[seed % dailyChallengePool.length];
+    return {
+      day: stamp,
+      id: def.id,
+      metric: def.metric,
+      target: def.target,
+      text: def.text,
+      progress: 0,
+      completed: false,
+    };
+  }
+
+  function saveDailyChallenge() {
+    if (!dailyChallenge) return;
+    try {
+      localStorage.setItem(dailyChallengeKey, JSON.stringify(dailyChallenge));
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
+  function renderDailyChallengePanel() {
+    if (!dailyChallengeEl || !dailyChallenge) return;
+    const progress = Math.min(dailyChallenge.progress, dailyChallenge.target);
+    const status = dailyChallenge.completed ? "Valmis" : `${progress}/${dailyChallenge.target}`;
+    dailyChallengeEl.classList.toggle("done", dailyChallenge.completed);
+    dailyChallengeEl.innerHTML =
+      `<div class="dc-title">Päivän haaste</div>` +
+      `<div class="dc-body">${dailyChallenge.text}</div>` +
+      `<div class="dc-progress">${status}</div>` +
+      `<div class="dc-reward">Palkinto +${dailyChallengeRewardScore} p</div>`;
+  }
+
+  function loadDailyChallenge() {
+    const today = dayStamp();
+    let next = null;
+    let shouldSave = false;
+
+    try {
+      const raw = localStorage.getItem(dailyChallengeKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (
+        parsed &&
+        parsed.day === today &&
+        typeof parsed.metric === "string" &&
+        Number.isFinite(parsed.target) &&
+        Number.isFinite(parsed.progress)
+      ) {
+        const def = dailyChallengePool.find((item) => item.metric === parsed.metric);
+        if (def) {
+          const progress = Math.max(0, Math.min(parsed.progress, def.target));
+          const completed = Boolean(parsed.completed) || progress >= def.target;
+          next = {
+            day: today,
+            id: def.id,
+            metric: def.metric,
+            target: def.target,
+            text: def.text,
+            progress,
+            completed,
+          };
+          shouldSave =
+            parsed.id !== def.id ||
+            parsed.target !== def.target ||
+            parsed.text !== def.text ||
+            parsed.progress !== progress ||
+            Boolean(parsed.completed) !== completed;
+        }
+      }
+    } catch {
+      next = null;
+    }
+
+    if (!next) {
+      next = pickChallengeForDay(today);
+      dailyChallenge = next;
+      saveDailyChallenge();
+    } else {
+      dailyChallenge = next;
+      if (shouldSave) saveDailyChallenge();
+    }
+
+    renderDailyChallengePanel();
+  }
+
+  function updateDailyChallenge(metric, amount = 1) {
+    if (!dailyChallenge) return;
+    if (dailyChallenge.completed) return;
+    if (dailyChallenge.metric !== metric) return;
+
+    dailyChallenge.progress = Math.min(dailyChallenge.target, dailyChallenge.progress + amount);
+    if (dailyChallenge.progress >= dailyChallenge.target) {
+      dailyChallenge.completed = true;
+      score += dailyChallengeRewardScore;
+      dailyChallengePopup = `PÄIVÄN HAASTE VALMIS  +${dailyChallengeRewardScore} p`;
+      dailyChallengePopupTimer = 1.4;
+      milestonePulse = Math.max(milestonePulse, 0.75);
+    }
+
+    saveDailyChallenge();
+    renderDailyChallengePanel();
+  }
 
   // Player in "world" space: x is lane-based, y increases forward; camera follows y.
   const player = {
@@ -237,6 +380,8 @@
     btnMenu.style.display = "block";
     btnRestart.style.display = "block";
     running = true; // still render
+    const bestScore = leaderboard.length > 0 ? leaderboard[0] : 0;
+    pointsToBest = Math.max(0, bestScore - score);
     updateLeaderboardForScore();
     stopBackgroundMusic();
     playMainMusic(mainMusicEndTrack);
@@ -276,12 +421,26 @@
     score = 0;
     latestRank = null;
     leaderboardChecked = false;
+    lastLaneSwitchY = -1e9;
+    lastLaneSwitchTo = -1;
+    nearMissPopupTimer = 0;
+    gatesPassed = 0;
+    bonusChain = 0;
+    bonusChainPopup = "";
+    bonusChainPopupTimer = 0;
+    dailyChallengePopup = "";
+    dailyChallengePopupTimer = 0;
+    nextMilestone = 100;
+    milestonePulse = 0;
+    pointsToBest = null;
 
     player.lane = 0;
     player.y = 0;
     player.alive = true;
 
     events.length = 0;
+    playerTrail.length = 0;
+    displayX = null;
     nextEventY = 700;
     scoreEl.textContent = score.toString();
 
@@ -331,6 +490,8 @@
     if (gameOver) return;
 
     player.lane = 1 - player.lane;
+    lastLaneSwitchY = player.y;
+    lastLaneSwitchTo = player.lane;
   }
 
   // Input
@@ -367,6 +528,8 @@
 
   btnRestart.addEventListener("click", (e) => {
     e.preventDefault();
+    btnMenu.style.display = "none";
+    btnRestart.style.display = "none";
     reset();
     stopMainMusic();
     if (!menuVisible) playBackgroundMusic();
@@ -376,6 +539,47 @@
   function laneX(lane, wobbleX) {
     const cx = canvas.width * 0.5 + wobbleX;
     return cx + (lane === 0 ? -baseLaneOffset : baseLaneOffset);
+  }
+
+  // --- Depth layer particles (parallax background) ---
+  const depthLayers = [
+    { parallax: 0.04, count: 60, minR: 0.0008, maxR: 0.0017, minA: 0.08, maxA: 0.22 },
+    { parallax: 0.14, count: 38, minR: 0.0013, maxR: 0.0030, minA: 0.15, maxA: 0.40 },
+    { parallax: 0.30, count: 22, minR: 0.0020, maxR: 0.0048, minA: 0.22, maxA: 0.58 },
+  ];
+
+  function initDepthLayers() {
+    for (const layer of depthLayers) {
+      layer.particles = [];
+      for (let i = 0; i < layer.count; i++) {
+        layer.particles.push({
+          x:            Math.random(),
+          baseY:        Math.random(),
+          r:            layer.minR + Math.random() * (layer.maxR - layer.minR),
+          a:            layer.minA + Math.random() * (layer.maxA - layer.minA),
+          twinkleSpeed: 0.35 + Math.random() * 1.1,
+          twinklePhase: Math.random() * Math.PI * 2,
+        });
+      }
+    }
+  }
+
+  function drawDepthLayers(cameraY) {
+    for (const layer of depthLayers) {
+      if (!layer.particles) continue;
+      for (const p of layer.particles) {
+        const sx = p.x * canvas.width;
+        const rawY = p.baseY * canvas.height - cameraY * layer.parallax;
+        const sy = ((rawY % canvas.height) + canvas.height) % canvas.height;
+        const tw = 0.62 + 0.38 * Math.sin(t * p.twinkleSpeed + p.twinklePhase);
+        const alpha = p.a * tw;
+        const pr = p.r * canvas.width;
+        ctx.beginPath();
+        ctx.arc(sx, sy, pr, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(180,220,255,${alpha.toFixed(3)})`;
+        ctx.fill();
+      }
+    }
   }
 
   function background() {
@@ -545,7 +749,12 @@
     if (!running) return;
 
     t += dt;
+    milestonePulse = Math.max(0, milestonePulse - dt * 1.8);
+    nearMissPopupTimer = Math.max(0, nearMissPopupTimer - dt);
+    bonusChainPopupTimer = Math.max(0, bonusChainPopupTimer - dt);
+    dailyChallengePopupTimer = Math.max(0, dailyChallengePopupTimer - dt);
 
+    const prevY = player.y;
     const speed = currentSpeed();
     player.y += speed * dt;
 
@@ -555,51 +764,83 @@
     // Collision checks at "event lines"
     for (const ev of events) {
       if (ev.type === "gate" && !ev.resolved) {
-        // When player is close enough to gate line, resolve it
-        if (player.y >= ev.y - gateDecisionDistance) {
+        // Resolve only when the player actually crosses the gate line.
+        if (prevY < ev.y && player.y >= ev.y) {
           ev.resolved = true;
           if (player.lane !== ev.openLane) {
             handleGameOver();
             break;
           } else if (!ev.scored) {
             ev.scored = true;
+            gatesPassed += 1;
             score += gateScore;
+            updateDailyChallenge("gates");
+
+            const switchDelta = ev.y - lastLaneSwitchY;
+            const isNearMiss =
+              lastLaneSwitchTo === ev.openLane &&
+              switchDelta >= 0 &&
+              switchDelta <= nearMissWindow;
+            if (isNearMiss) {
+              score += nearMissScore;
+              nearMissPopupTimer = 0.75;
+              updateDailyChallenge("perfect");
+            }
           }
         }
       } else if (ev.type === "hazard" && !ev.hit && !ev.passed) {
-        // Simple distance check near hazard line (since movement is mostly along y)
-        const dy = Math.abs(player.y - ev.y);
-        if (dy < hazardRadius + playerRadius * 0.9) {
+        // Resolve hazard when crossing its hit window.
+        const hitBand = hazardRadius + playerRadius * 0.9;
+        const enteredBand = prevY < ev.y + hitBand && player.y >= ev.y - hitBand;
+        if (enteredBand) {
           if (player.lane === ev.lane) {
             ev.hit = true;
             playSfx(hazardHitSfx, 0.28);
             // Lose points but continue playing
             score = Math.max(0, score - hazardPenalty);
+            bonusChain = 0;
           }
-        } else if (player.y > ev.y + hazardRadius + playerRadius * 0.9) {
+        }
+        if (player.y > ev.y + hitBand) {
           ev.passed = true;
           // No points for avoiding, only penalty for hitting
         }
       } else if (ev.type === "bonus" && !ev.collected) {
-        // Check if player collects bonus
-        const dy = Math.abs(player.y - ev.y);
-        if (dy < bonusRadius + playerRadius * 1.2) {
-          if (player.lane === ev.lane) {
-            ev.collected = true;
-            playSfx(bonusCollectSfx, 0.38);
-            score += bonusScore;
+        // Resolve bonus when crossing its collect window.
+        const collectBand = bonusRadius + playerRadius * 1.2;
+        const enteredBand = prevY < ev.y + collectBand && player.y >= ev.y - collectBand;
+        if (enteredBand && player.lane === ev.lane) {
+          ev.collected = true;
+          playSfx(bonusCollectSfx, 0.38);
+          bonusChain += 1;
+          score += bonusScore;
+          updateDailyChallenge("bonus");
+
+          if (bonusChain % bonusChainStep === 0) {
+            const chainTier = Math.floor(bonusChain / bonusChainStep);
+            const chainReward = 8 + chainTier * 4;
+            score += chainReward;
+            bonusChainPopup = `BONUSKETJU x${bonusChain}  +${chainReward} p`;
+            bonusChainPopupTimer = 1.1;
+            milestonePulse = Math.max(milestonePulse, 0.7);
           }
-        } else if (player.y > ev.y + bonusRadius + playerRadius * 1.2) {
+        } else if (player.y > ev.y + collectBand) {
           // Bonus passed without collection, mark as collected so not checked again
           ev.collected = true;
+          bonusChain = 0;
         }
       }
+    }
+
+    while (score >= nextMilestone) {
+      nextMilestone += milestoneStep(nextMilestone);
+      milestonePulse = 1;
     }
 
     scoreEl.textContent = score.toString();
   }
 
-  function render() {
+  function render(dt = 0.016) {
     background();
 
     const speed = currentSpeed();
@@ -619,6 +860,7 @@
     const wobbleX = Math.sin(t * (Math.PI * 2) * wobbleFreq) * wobbleAmp;
     const wobbleY = Math.cos(t * (Math.PI * 2) * wobbleFreq * 0.8) * (wobbleAmp * 0.35);
 
+    drawDepthLayers(cameraY);
     drawFlow(cameraY, wobbleX, wobbleY, pulse);
 
     // Draw upcoming events (only those near camera)
@@ -643,7 +885,79 @@
     // Player always at fixed screen Y
     const px = laneX(player.lane, wobbleX);
     const py = targetScreenY + wobbleY * 0.12;
-    drawPlayer(px, py, pulse, player.alive);
+
+    // Smooth display x — lerps toward target lane so trail curves on lane switch
+    if (displayX === null) displayX = px;
+    displayX += (px - displayX) * Math.min(1, 22 * dt);
+
+    // Record trail history (only x — y is always the same fixed screen position)
+    if (!gameOver) {
+      playerTrail.push(displayX);
+      if (playerTrail.length > 12) playerTrail.shift();
+    }
+
+    // Draw trail oldest→newest; y offset goes upward from player
+    const trailLen = playerTrail.length;
+    const trailSpacing = Math.min(28, currentSpeed() * 0.030);
+    for (let i = 0; i < trailLen; i++) {
+      const frac = trailLen > 1 ? i / (trailLen - 1) : 1; // 0=oldest, 1=newest(closest)
+      const alpha = frac * (player.alive ? 0.55 : 0.32);
+      const tr = playerRadius * (0.18 + 0.70 * frac);
+      const tx = playerTrail[i];
+      const ty = py - (trailLen - 1 - i) * trailSpacing;  // older = further up
+      const tg = ctx.createRadialGradient(tx, ty, 0, tx, ty, tr * 2.8);
+      if (player.alive) {
+        tg.addColorStop(0, `rgba(160,230,255,${alpha.toFixed(3)})`);
+        tg.addColorStop(1, "rgba(100,160,255,0)");
+      } else {
+        tg.addColorStop(0, `rgba(255,90,130,${alpha.toFixed(3)})`);
+        tg.addColorStop(1, "rgba(255,60,100,0)");
+      }
+      ctx.beginPath();
+      ctx.arc(tx, ty, tr * 2.8, 0, Math.PI * 2);
+      ctx.fillStyle = tg;
+      ctx.fill();
+    }
+
+    drawPlayer(displayX, py, pulse, player.alive);
+
+    if (!menuVisible && !gameOver) {
+      const toTarget = Math.max(0, nextMilestone - score);
+      const pulseBoost = milestonePulse * 0.35;
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = `rgba(150,210,255,${0.76 + pulseBoost})`;
+      ctx.font = `700 ${Math.floor(canvas.width * 0.022)}px 'Poppins', sans-serif`;
+      ctx.fillText(`Portteja läpäisty ${gatesPassed}   Bonusketju ${bonusChain}`, canvas.width * 0.5, canvas.height * 0.11);
+
+      ctx.fillStyle = `rgba(150,210,255,${0.78 + pulseBoost})`;
+      ctx.font = `600 ${Math.floor(canvas.width * 0.020)}px 'Poppins', sans-serif`;
+      ctx.fillText(`Seuraava tavoite ${nextMilestone} p  (${toTarget} p)`, canvas.width * 0.5, canvas.height * 0.165);
+
+      if (bonusChainPopupTimer > 0) {
+        const a = Math.min(1, bonusChainPopupTimer / 1.1);
+        ctx.fillStyle = `rgba(160,230,255,${0.58 * a})`;
+        ctx.fillRect(canvas.width * 0.24, canvas.height * 0.19, canvas.width * 0.52, canvas.height * 0.055);
+
+        ctx.fillStyle = `rgba(205,245,255,${0.95 * a})`;
+        ctx.font = `700 ${Math.floor(canvas.width * 0.020)}px 'Poppins', sans-serif`;
+        ctx.fillText(bonusChainPopup, canvas.width * 0.5, canvas.height * 0.225);
+      }
+
+      if (nearMissPopupTimer > 0) {
+        const a = Math.min(1, nearMissPopupTimer / 0.75);
+        ctx.fillStyle = `rgba(150,220,255,${0.92 * a})`;
+        ctx.font = `700 ${Math.floor(canvas.width * 0.021)}px 'Poppins', sans-serif`;
+        ctx.fillText(`VIIME HETKEN BONUS! +${nearMissScore} p`, canvas.width * 0.5, canvas.height * 0.285);
+      }
+
+      if (dailyChallengePopupTimer > 0) {
+        const a = Math.min(1, dailyChallengePopupTimer / 1.4);
+        ctx.fillStyle = `rgba(170,255,220,${0.95 * a})`;
+        ctx.font = `700 ${Math.floor(canvas.width * 0.022)}px 'Poppins', sans-serif`;
+        ctx.fillText(dailyChallengePopup, canvas.width * 0.5, canvas.height * 0.335);
+      }
+    }
 
     // Game over overlay
     if (gameOver) {
@@ -653,7 +967,7 @@
       ctx.fillStyle = "rgba(233,236,255,0.95)";
       ctx.textAlign = "center";
       ctx.font = `700 ${Math.floor(canvas.width * 0.045)}px 'Orbitron', 'Poppins', sans-serif`;
-      ctx.fillText("Peli päättyi!", canvas.width * 0.5, canvas.height * 0.25);
+      ctx.fillText("Peli päättyi!", canvas.width * 0.5, canvas.height * 0.22);
 
       ctx.fillStyle = "rgba(190,240,255,0.92)";
       ctx.font = `700 ${Math.floor(canvas.width * 0.026)}px 'Poppins', sans-serif`;
@@ -673,7 +987,26 @@
       if (latestRank !== null) {
         ctx.fillStyle = "rgba(160,220,255,0.98)";
         ctx.font = `700 ${Math.floor(canvas.width * 0.032)}px 'Poppins', sans-serif`;
-        ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.86);
+        ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.88);
+      }
+
+      if (pointsToBest !== null && pointsToBest > 0) {
+        ctx.fillStyle = "rgba(150,210,255,0.95)";
+        ctx.font = `600 ${Math.floor(canvas.width * 0.026)}px 'Poppins', sans-serif`;
+        ctx.fillText(`Ennätykseen ${pointsToBest} p`, canvas.width * 0.5, canvas.height * 0.78);
+      }
+
+      if (dailyChallenge) {
+        const done = dailyChallenge.completed;
+        const progress = Math.min(dailyChallenge.progress, dailyChallenge.target);
+        ctx.fillStyle = done ? "rgba(170,255,220,0.96)" : "rgba(150,210,255,0.9)";
+        ctx.font = `600 ${Math.floor(canvas.width * 0.017)}px 'Poppins', sans-serif`;
+        ctx.fillText(`Päivän haaste: ${dailyChallenge.text}`, canvas.width * 0.5, canvas.height * 0.275);
+        ctx.font = `600 ${Math.floor(canvas.width * 0.015)}px 'Poppins', sans-serif`;
+        const statusLine = done
+          ? `Valmis  •  Palkinto +${dailyChallengeRewardScore} p`
+          : `${progress}/${dailyChallenge.target}  •  Palkinto +${dailyChallengeRewardScore} p`;
+        ctx.fillText(statusLine, canvas.width * 0.5, canvas.height * 0.304);
       }
     }
   }
@@ -684,12 +1017,14 @@
     lastTs = ts;
 
     if (!gameOver) update(dt);
-    render();
+    render(dt);
 
     requestAnimationFrame(loop);
   }
 
+  loadDailyChallenge();
   leaderboard = loadLeaderboard();
+  initDepthLayers();
   playMainMusic();
   requestAnimationFrame(loop);
 })();
