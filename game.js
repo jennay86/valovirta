@@ -7,6 +7,8 @@
   const btnMenu = document.getElementById("btnMenu");
   const menu = document.getElementById("menu");
   const btnStart = document.getElementById("btnStart");
+  const titleEl = document.getElementById("title");
+  const hintEl = document.getElementById("hint");
 
   // --- Canvas sizing (portrait-friendly) ---
   function resize() {
@@ -31,6 +33,7 @@
   const speedRampPerSec = 12.5;   // +px/s per second survived
   const minSpawnDistance = 260;   // distance between events
   const maxSpawnDistance = 420;
+  const earlyEaseDuration = 22;   // first seconds are intentionally softer
 
   const startWobbleAmp = 0;
   const maxWobbleAmp = 110;
@@ -48,6 +51,8 @@
   const leaderboardKey = "valovirta_top5";
   const hazardHitSfx = "assets/boom.mp3";
   const bonusCollectSfx = "assets/booster.mp3";
+  const mainMusicTrack = "assets/main_music.mp3";
+  const mainMusicEndTrack = "assets/main_music_end.mp3";
   const backgroundTracks = [
     "assets/back1.mp3",
     "assets/back2.mp3",
@@ -63,6 +68,7 @@
 
   // Hide menu button initially (show only during game)
   btnMenu.style.display = "none";
+  btnRestart.style.display = "none";
 
   let t = 0;          // seconds
   let lastTs = 0;
@@ -71,6 +77,7 @@
   let latestRank = null;
   let leaderboardChecked = false;
   let backgroundMusic = null;
+  let mainMusic = null;
 
   // Player in "world" space: x is lane-based, y increases forward; camera follows y.
   const player = {
@@ -94,6 +101,32 @@
   function rand(min, max) { return min + Math.random() * (max - min); }
   function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
 
+  function difficultyProgress() {
+    // Slow, steady baseline increase over ~2 minutes.
+    return Math.min(1, t / 120);
+  }
+
+  function currentSpeed() {
+    const p = difficultyProgress();
+    const earlyEase = Math.min(1, t / earlyEaseDuration);
+    const wave = Math.sin(t * 0.55) * (0.03 + 0.09 * p);
+    const base = startSpeed + t * speedRampPerSec;
+    const scale = 1 + p * 0.22 + wave;
+    const softStart = 0.78 + 0.22 * earlyEase;
+    return base * Math.max(0.86, scale) * softStart;
+  }
+
+  function currentSpawnDistanceRange() {
+    const p = difficultyProgress();
+    const earlyEase = Math.min(1, t / earlyEaseDuration);
+    const wave = Math.sin(t * 0.42 + 1.2) * (0.04 + 0.10 * p);
+    const pressure = Math.max(0.72, 1 + p * 0.26 + wave);
+    const starterBreath = 1 + (1 - earlyEase) * 0.20;
+    const minDist = Math.max(170, Math.floor((minSpawnDistance / pressure) * starterBreath));
+    const maxDist = Math.max(minDist + 60, Math.floor((maxSpawnDistance / pressure) * starterBreath));
+    return { minDist, maxDist };
+  }
+
   function pickRandomTrack(currentSrc = "") {
     const pool = backgroundTracks.filter((track) => !currentSrc.endsWith(track));
     return choice(pool.length > 0 ? pool : backgroundTracks);
@@ -103,6 +136,25 @@
     if (!backgroundMusic) return;
     backgroundMusic.pause();
     backgroundMusic.currentTime = 0;
+  }
+
+  function playMainMusic(track = mainMusicTrack) {
+    if (!mainMusic) {
+      mainMusic = new Audio(track);
+      mainMusic.loop = true;
+      mainMusic.volume = 0.28;
+    }
+    if (!mainMusic.src.endsWith(track)) {
+      mainMusic.src = track;
+    }
+    mainMusic.currentTime = 0;
+    mainMusic.play().catch(() => {});
+  }
+
+  function stopMainMusic() {
+    if (!mainMusic) return;
+    mainMusic.pause();
+    mainMusic.currentTime = 0;
   }
 
   function playBackgroundMusic() {
@@ -126,6 +178,12 @@
     const sfx = new Audio(src);
     sfx.volume = volume;
     sfx.play().catch(() => {});
+  }
+
+  function unlockAudioOnce() {
+    if (menuVisible || gameOver) {
+      playMainMusic(gameOver ? mainMusicEndTrack : mainMusicTrack);
+    }
   }
 
   function loadLeaderboard() {
@@ -177,27 +235,36 @@
     gameOver = true;
     player.alive = false;
     btnMenu.style.display = "block";
+    btnRestart.style.display = "block";
     running = true; // still render
     updateLeaderboardForScore();
     stopBackgroundMusic();
+    playMainMusic(mainMusicEndTrack);
   }
 
   function startGame() {
     menuVisible = false;
     menu.classList.add("menu-hidden");
     btnMenu.style.display = "none";
+    btnRestart.style.display = "none";
+    titleEl.style.display = "none";
+    hintEl.style.display = "none";
     running = true;
+    stopMainMusic();
     reset();
     playBackgroundMusic();
   }
 
   function returnToMenu() {
     menuVisible = true;
+    titleEl.style.display = "block";
+    hintEl.style.display = "block";
     menu.classList.remove("menu-hidden");
     btnMenu.style.display = "none";
     running = false;
     gameOver = false;
     stopBackgroundMusic();
+    playMainMusic(mainMusicTrack);
   }
 
   function reset() {
@@ -225,13 +292,19 @@
   function spawnEvent() {
     // alternate between gates and hazards, with a bit of controlled randomness
     // occasionally add a bonus ball
+    const p = difficultyProgress();
+    const earlyEase = Math.min(1, t / 20);
     let type;
     if (Math.random() < 0.12) {
       type = "bonus";
     } else if (events.length % 2 === 0) {
       type = "gate";
     } else {
-      type = Math.random() < 0.55 ? "hazard" : "gate";
+      // Hazard chance starts gentler and rises over time.
+      const baseHazardChance = 0.30 + p * 0.25;
+      const softStartReduction = (1 - earlyEase) * 0.12;
+      const hazardChance = Math.max(0.18, baseHazardChance - softStartReduction);
+      type = Math.random() < hazardChance ? "hazard" : "gate";
     }
 
     const y = nextEventY;
@@ -249,7 +322,8 @@
       events.push({ type: "bonus", y, lane, collected: false });
     }
 
-    nextEventY += rand(minSpawnDistance, maxSpawnDistance);
+    const { minDist, maxDist } = currentSpawnDistanceRange();
+    nextEventY += rand(minDist, maxDist);
   }
 
   function toggleLane() {
@@ -271,6 +345,9 @@
     }
   }, { passive: false });
 
+  window.addEventListener("pointerdown", unlockAudioOnce, { once: true, passive: true });
+  window.addEventListener("keydown", unlockAudioOnce, { once: true });
+
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     if (!menuVisible && !gameOver) {
@@ -291,6 +368,7 @@
   btnRestart.addEventListener("click", (e) => {
     e.preventDefault();
     reset();
+    stopMainMusic();
     if (!menuVisible) playBackgroundMusic();
   });
 
@@ -468,7 +546,7 @@
 
     t += dt;
 
-    const speed = startSpeed + t * speedRampPerSec;
+    const speed = currentSpeed();
     player.y += speed * dt;
 
     // Keep spawning events ahead
@@ -524,7 +602,7 @@
   function render() {
     background();
 
-    const speed = startSpeed + t * speedRampPerSec;
+    const speed = currentSpeed();
     const bpm = bpmFromSpeed(speed);
     const beat = (t * bpm) / 60; // cycles per second
     const pulse = (Math.sin(beat * Math.PI * 2) * 0.5 + 0.5);
@@ -534,7 +612,10 @@
     const targetScreenY = canvas.height * 0.45;
 
     // Wobble increases over time
-    const wobbleAmp = Math.min(maxWobbleAmp, startWobbleAmp + t * wobbleRampPerSec);
+    const p = difficultyProgress();
+    const wobbleWave = 1 + Math.sin(t * 0.9) * (0.05 + 0.15 * p);
+    const wobbleBase = startWobbleAmp + t * wobbleRampPerSec;
+    const wobbleAmp = Math.min(maxWobbleAmp, wobbleBase * (0.85 + 0.25 * p) * wobbleWave);
     const wobbleX = Math.sin(t * (Math.PI * 2) * wobbleFreq) * wobbleAmp;
     const wobbleY = Math.cos(t * (Math.PI * 2) * wobbleFreq * 0.8) * (wobbleAmp * 0.35);
 
@@ -571,32 +652,28 @@
 
       ctx.fillStyle = "rgba(233,236,255,0.95)";
       ctx.textAlign = "center";
-      ctx.font = `${Math.floor(canvas.width * 0.06)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      ctx.fillText("Peli loppui", canvas.width * 0.5, canvas.height * 0.36);
-
-      ctx.fillStyle = "rgba(233,236,255,0.75)";
-      ctx.font = `${Math.floor(canvas.width * 0.038)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      
+      ctx.font = `700 ${Math.floor(canvas.width * 0.045)}px 'Orbitron', 'Poppins', sans-serif`;
+      ctx.fillText("Peli päättyi!", canvas.width * 0.5, canvas.height * 0.25);
 
       ctx.fillStyle = "rgba(190,240,255,0.92)";
-      ctx.font = `${Math.floor(canvas.width * 0.04)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      ctx.fillText("Top 5", canvas.width * 0.5, canvas.height * 0.50);
+      ctx.font = `700 ${Math.floor(canvas.width * 0.026)}px 'Poppins', sans-serif`;
+      ctx.fillText("Top 5", canvas.width * 0.5, canvas.height * 0.38);
 
       ctx.fillStyle = "rgba(233,236,255,0.88)";
-      ctx.font = `${Math.floor(canvas.width * 0.034)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.font = `${Math.floor(canvas.width * 0.028)}px 'Poppins', sans-serif`;
       if (leaderboard.length === 0) {
-        ctx.fillText("Ei tuloksia viela", canvas.width * 0.5, canvas.height * 0.55);
+        ctx.fillText("Ei tuloksia viela", canvas.width * 0.5, canvas.height * 0.47);
       } else {
         for (let i = 0; i < leaderboard.length; i++) {
-          const lineY = canvas.height * 0.55 + i * Math.floor(canvas.height * 0.04);
+          const lineY = canvas.height * 0.47 + i * Math.floor(canvas.height * 0.054);
           ctx.fillText(`${i + 1}. ${leaderboard[i]} p`, canvas.width * 0.5, lineY);
         }
       }
 
       if (latestRank !== null) {
-        ctx.fillStyle = "rgba(160,255,220,0.95)";
-        ctx.font = `${Math.floor(canvas.width * 0.04)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-        ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.78);
+        ctx.fillStyle = "rgba(160,220,255,0.98)";
+        ctx.font = `700 ${Math.floor(canvas.width * 0.032)}px 'Poppins', sans-serif`;
+        ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.86);
       }
     }
   }
@@ -613,5 +690,6 @@
   }
 
   leaderboard = loadLeaderboard();
+  playMainMusic();
   requestAnimationFrame(loop);
 })();
