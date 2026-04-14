@@ -76,13 +76,17 @@ body {
   left: 0;
   right: 0;
   bottom: 18px;
-  display: flex;
+  display: none;
   gap: 10px;
   justify-content: center;
   padding: 14px;
   padding-bottom: max(8px, env(safe-area-inset-bottom));
   background: linear-gradient(to top, rgba(5,6,10,.86), rgba(5,6,10,0));
   pointer-events: none;
+}
+
+body.state-game-over #ui .bottom {
+  display: flex;
 }
 
 button {
@@ -132,6 +136,11 @@ button:active {
 #menu.menu-hidden {
   opacity: 0;
   pointer-events: none;
+  visibility: hidden;
+}
+
+#menu.menu-hidden * {
+  pointer-events: none !important;
 }
 
 .menu-bg {
@@ -408,4 +417,10 @@ button:active {
   border-color: rgba(140,255,205,0.42);
   color: rgba(190,255,230,0.95);
   box-shadow: inset 0 0 20px rgba(120,255,200,0.08), 0 0 18px rgba(120,255,200,0.08);
+}
+
+@media (max-width: 768px) {
+  .menu-content h1 {
+    font-size: 48px;
+  }
 }

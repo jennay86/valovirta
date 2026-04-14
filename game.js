@@ -75,9 +75,14 @@
   let gameOver = false;
   let menuVisible = true;
 
-  // Hide menu button initially (show only during game)
-  btnMenu.style.display = "none";
-  btnRestart.style.display = "none";
+  // Bottom controls are visible only on game over
+  btnRestart.disabled = true;
+
+  function syncBottomControls() {
+    const showGameOverControls = gameOver;
+    document.body.classList.toggle("state-game-over", showGameOverControls);
+    btnRestart.disabled = !showGameOverControls;
+  }
 
   let t = 0;          // seconds
   let lastTs = 0;
@@ -102,6 +107,7 @@
   let dailyChallenge = null;
   let dailyChallengePopup = "";
   let dailyChallengePopupTimer = 0;
+  const explosions = [];
 
   function milestoneStep(target) {
     if (target < 300) return 100;
@@ -377,8 +383,7 @@
   function handleGameOver() {
     gameOver = true;
     player.alive = false;
-    btnMenu.style.display = "block";
-    btnRestart.style.display = "block";
+    syncBottomControls();
     running = true; // still render
     const bestScore = leaderboard.length > 0 ? leaderboard[0] : 0;
     pointsToBest = Math.max(0, bestScore - score);
@@ -390,32 +395,38 @@
   function startGame() {
     menuVisible = false;
     menu.classList.add("menu-hidden");
-    btnMenu.style.display = "none";
-    btnRestart.style.display = "none";
+    menu.style.display = "none";
+    btnStart.disabled = true;
+    syncBottomControls();
     titleEl.style.display = "none";
     hintEl.style.display = "none";
     running = true;
     stopMainMusic();
-    reset();
+    reset(true);
     playBackgroundMusic();
   }
 
   function returnToMenu() {
     menuVisible = true;
+    menu.style.display = "flex";
+    btnStart.disabled = false;
     titleEl.style.display = "block";
     hintEl.style.display = "block";
     menu.classList.remove("menu-hidden");
-    btnMenu.style.display = "none";
     running = false;
     gameOver = false;
+    syncBottomControls();
     stopBackgroundMusic();
     playMainMusic(mainMusicTrack);
   }
 
-  function reset() {
+  function reset(force = false) {
+    const isPlaying = running && !menuVisible && !gameOver;
+    if (isPlaying && !force) return;
+
     running = true;
     gameOver = false;
-    btnMenu.style.display = "none";
+    syncBottomControls();
     t = 0;
     lastTs = 0;
     score = 0;
@@ -518,6 +529,7 @@
 
   btnStart.addEventListener("click", (e) => {
     e.preventDefault();
+    if (!menuVisible) return;
     startGame();
   });
 
@@ -528,9 +540,8 @@
 
   btnRestart.addEventListener("click", (e) => {
     e.preventDefault();
-    btnMenu.style.display = "none";
-    btnRestart.style.display = "none";
-    reset();
+    if (!gameOver) return;
+    reset(true);
     stopMainMusic();
     if (!menuVisible) playBackgroundMusic();
   });
@@ -796,6 +807,8 @@
           if (player.lane === ev.lane) {
             ev.hit = true;
             playSfx(hazardHitSfx, 0.28);
+            // Create explosion effect at hazard location (store world Y)
+            explosions.push({ worldY: ev.y, lane: ev.lane, timer: 0.75, type: 'hazard' });
             // Lose points but continue playing
             score = Math.max(0, score - hazardPenalty);
             bonusChain = 0;
@@ -812,6 +825,8 @@
         if (enteredBand && player.lane === ev.lane) {
           ev.collected = true;
           playSfx(bonusCollectSfx, 0.38);
+          // Create explosion effect at bonus location (store world Y)
+          explosions.push({ worldY: ev.y, lane: ev.lane, timer: 0.6, type: 'bonus' });
           bonusChain += 1;
           score += bonusScore;
           updateDailyChallenge("bonus");
@@ -896,6 +911,14 @@
       if (playerTrail.length > 12) playerTrail.shift();
     }
 
+    // Update explosions
+    for (let i = explosions.length - 1; i >= 0; i--) {
+      explosions[i].timer -= dt;
+      if (explosions[i].timer <= 0) {
+        explosions.splice(i, 1);
+      }
+    }
+
     // Draw trail oldest→newest; y offset goes upward from player
     const trailLen = playerTrail.length;
     const trailSpacing = Math.min(28, currentSpeed() * 0.030);
@@ -917,6 +940,61 @@
       ctx.arc(tx, ty, tr * 2.8, 0, Math.PI * 2);
       ctx.fillStyle = tg;
       ctx.fill();
+    }
+
+    // Draw explosions
+    for (const exp of explosions) {
+      const expScreenY = targetScreenY - (cameraY - exp.worldY) + wobbleY * 0.1;
+      const expScreenX = laneX(exp.lane, wobbleX);
+      const progress = 1 - (exp.timer / (exp.type === 'hazard' ? 0.75 : 0.6)); // 0=start, 1=end
+      
+      if (exp.type === 'hazard') {
+        // Bigger, more dramatic explosion for hazard
+        const particleCount = 20;
+        const maxRadius = 140;
+        
+        for (let i = 0; i < particleCount; i++) {
+          const angle = (Math.PI * 2 / particleCount) * i + Math.sin(t * 8 + i) * 0.3;
+          const distance = progress * maxRadius;
+          const px = expScreenX + Math.cos(angle) * distance;
+          const py = expScreenY + Math.sin(angle) * distance;
+          const radius = (1 - progress) * 16;
+          const alpha = Math.max(0, (1 - progress * 1.2) * 0.95);
+          
+          // Glow effect
+          const glow = ctx.createRadialGradient(px, py, 0, px, py, radius * 2);
+          glow.addColorStop(0, `rgba(255,120,150,${alpha * 0.7})`);
+          glow.addColorStop(1, `rgba(255,60,100,0)`);
+          ctx.fillStyle = glow;
+          ctx.beginPath();
+          ctx.arc(px, py, radius * 2, 0, Math.PI * 2);
+          ctx.fill();
+          
+          // Core particle
+          ctx.fillStyle = `rgba(255,150,170,${alpha})`;
+          ctx.beginPath();
+          ctx.arc(px, py, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // Bonus explosion
+        const particleCount = 14;
+        const maxRadius = 90;
+        
+        for (let i = 0; i < particleCount; i++) {
+          const angle = (Math.PI * 2 / particleCount) * i;
+          const distance = progress * maxRadius;
+          const px = expScreenX + Math.cos(angle) * distance;
+          const py = expScreenY + Math.sin(angle) * distance;
+          const radius = (1 - progress) * 14;
+          const alpha = (1 - progress) * 0.8;
+          
+          ctx.fillStyle = `rgba(255,240,100,${alpha})`;
+          ctx.beginPath();
+          ctx.arc(px, py, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
 
     drawPlayer(displayX, py, pulse, player.alive);
@@ -961,20 +1039,28 @@
 
     // Game over overlay
     if (gameOver) {
+      const isMobile = window.innerWidth <= 768;
+      const dpr = canvas.width / Math.max(1, window.innerWidth);
+      const fontPx = (relativeSize, minCssPx = 0) => {
+        const scaled = Math.floor(canvas.width * relativeSize);
+        const minDevicePx = Math.floor(minCssPx * dpr);
+        return Math.max(scaled, minDevicePx);
+      };
+
       ctx.fillStyle = "rgba(5,6,10,0.58)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.fillStyle = "rgba(233,236,255,0.95)";
       ctx.textAlign = "center";
-      ctx.font = `700 ${Math.floor(canvas.width * 0.045)}px 'Orbitron', 'Poppins', sans-serif`;
+      ctx.font = `700 ${fontPx(0.045, isMobile ? 24 : 0)}px 'Orbitron', 'Poppins', sans-serif`;
       ctx.fillText("Peli päättyi!", canvas.width * 0.5, canvas.height * 0.22);
 
       ctx.fillStyle = "rgba(190,240,255,0.92)";
-      ctx.font = `700 ${Math.floor(canvas.width * 0.026)}px 'Poppins', sans-serif`;
+      ctx.font = `700 ${fontPx(0.026, isMobile ? 16 : 0)}px 'Poppins', sans-serif`;
       ctx.fillText("Top 5", canvas.width * 0.5, canvas.height * 0.38);
 
       ctx.fillStyle = "rgba(233,236,255,0.88)";
-      ctx.font = `${Math.floor(canvas.width * 0.028)}px 'Poppins', sans-serif`;
+      ctx.font = `${fontPx(0.028, isMobile ? 15 : 0)}px 'Poppins', sans-serif`;
       if (leaderboard.length === 0) {
         ctx.fillText("Ei tuloksia viela", canvas.width * 0.5, canvas.height * 0.47);
       } else {
@@ -986,13 +1072,13 @@
 
       if (latestRank !== null) {
         ctx.fillStyle = "rgba(160,220,255,0.98)";
-        ctx.font = `700 ${Math.floor(canvas.width * 0.032)}px 'Poppins', sans-serif`;
+        ctx.font = `700 ${fontPx(0.032, isMobile ? 17 : 0)}px 'Poppins', sans-serif`;
         ctx.fillText(`Uusi Top 5 -tulos! Sija ${latestRank}`, canvas.width * 0.5, canvas.height * 0.88);
       }
 
       if (pointsToBest !== null && pointsToBest > 0) {
         ctx.fillStyle = "rgba(150,210,255,0.95)";
-        ctx.font = `600 ${Math.floor(canvas.width * 0.026)}px 'Poppins', sans-serif`;
+        ctx.font = `600 ${fontPx(0.026, isMobile ? 14 : 0)}px 'Poppins', sans-serif`;
         ctx.fillText(`Ennätykseen ${pointsToBest} p`, canvas.width * 0.5, canvas.height * 0.78);
       }
 
@@ -1000,9 +1086,9 @@
         const done = dailyChallenge.completed;
         const progress = Math.min(dailyChallenge.progress, dailyChallenge.target);
         ctx.fillStyle = done ? "rgba(170,255,220,0.96)" : "rgba(150,210,255,0.9)";
-        ctx.font = `600 ${Math.floor(canvas.width * 0.017)}px 'Poppins', sans-serif`;
+        ctx.font = `600 ${fontPx(0.017, isMobile ? 13 : 0)}px 'Poppins', sans-serif`;
         ctx.fillText(`Päivän haaste: ${dailyChallenge.text}`, canvas.width * 0.5, canvas.height * 0.275);
-        ctx.font = `600 ${Math.floor(canvas.width * 0.015)}px 'Poppins', sans-serif`;
+        ctx.font = `600 ${fontPx(0.015, isMobile ? 12 : 0)}px 'Poppins', sans-serif`;
         const statusLine = done
           ? `Valmis  •  Palkinto +${dailyChallengeRewardScore} p`
           : `${progress}/${dailyChallenge.target}  •  Palkinto +${dailyChallengeRewardScore} p`;
@@ -1012,6 +1098,8 @@
   }
 
   function loop(ts) {
+    syncBottomControls();
+
     if (!lastTs) lastTs = ts;
     const dt = Math.min(0.033, (ts - lastTs) / 1000);
     lastTs = ts;
