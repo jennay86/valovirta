@@ -1,8 +1,10 @@
 # valovirta
 
+Pelin osoite: https://jennay86.github.io/valovirta/
+
 Tämä on ensimmäinen alusta asti tekemäni peli. Peli on tehty hyvin vahvasti tekoälyä hyödyntäen.
-Käytin ChatGPT:tä ja maksullista versiota GitHubista.
-Aluksi ideoin ChatGPT:n kanssa. Sitten loin GitHubin aavulla koodin pelin rungoksi. Tämän jälkeen muokkasin koodia Visual Studio Codessa GittHubin avulla. Github myös auttoi minua saamaan pelin julkaistavaan muotoon.
+Käytin ChatGPT:tä ja maksullista versiota GitHubista sekä Live Server -lisäosaa.
+Aluksi ideoin ChatGPT:n kanssa. Sitten loin GitHubin Copilotin avulla koodin pelin rungoksi. Tämän jälkeen muokkasin koodia Visual Studio Codessa GittHub Copilotin avulla. Github Copilot myös auttoi minua saamaan pelin julkaistavaan muotoon GitHubiin.
 
 Tässä on saamani koodi, jota lähdin muokkaamaan:
 
